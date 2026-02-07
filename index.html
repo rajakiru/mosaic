@@ -20,6 +20,16 @@
     .fade-up-3 { animation-delay: 0.19s; opacity: 0; }
     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     .fade-in { animation: fadeIn 0.2s ease-out forwards; }
+
+    @media (max-width: 768px) {
+      .mosaic-main { flex-direction: column !important; height: 100vh !important; overflow: hidden !important; }
+      .mosaic-topbar { display: flex !important; }
+      .mosaic-tree { width: 100% !important; order: 2 !important; flex: 1 1 0% !important; }
+      .mosaic-chat { width: 100% !important; order: 3 !important; flex: 0 0 auto !important; max-height: 45vh !important; border-right: none !important; border-top: 1px solid #e8e2da; overflow-y: auto !important; }
+      .mosaic-chat-header { display: none !important; }
+      .mosaic-tree-header, .mosaic-tree-footer { display: none !important; }
+      .mosaic-key-card { padding: 32px 24px !important; }
+    }
   </style>
 </head>
 <body>
@@ -44,6 +54,27 @@
         <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
       </svg>
     );
+
+    /* ── API Configuration ── */
+    // Auto-detect environment and set API base URL
+    const getApiBaseUrl = () => {
+      const hostname = window.location.hostname;
+      
+      // Local development
+      if (hostname === 'localhost' || hostname === '127.0.0.1') {
+        return 'http://localhost:3001';
+      }
+      
+      // Production (Fly.io or any deployed environment)
+      // Use relative URL (same origin)
+      return '';
+    };
+
+    const API_BASE_URL = getApiBaseUrl();
+    
+    // Log for debugging (optional - remove in production)
+    console.log('Environment:', window.location.hostname);
+    console.log('API Base URL:', API_BASE_URL || 'same-origin');
 
     /* ── Constants ── */
     const NODE_W = 160;
@@ -81,6 +112,9 @@ Additionally, based on concrete details the user has mentioned so far (companies
       const [decisionInput, setDecisionInput] = useState('');
       const [hoveredNodeId, setHoveredNodeId] = useState(null);
       const [error, setError] = useState(null);
+      const [selectedModel, setSelectedModel] = useState('anthropic/claude-sonnet-4-20250514');
+      const [mcpEnabled, setMcpEnabled] = useState(true);
+      const [stepCounter, setStepCounter] = useState(0);
       const treeRef = useRef(null);
       const leftRef = useRef(null);
 
@@ -126,25 +160,35 @@ Additionally, based on concrete details the user has mentioned so far (companies
       };
 
       /* ── API ── */
-      const callAI = async (systemPrompt, userMessage) => {
-        const resp = await fetch('http://localhost:3001/api/chat', {
+      const callAI = async (systemPrompt, userMessage, useMCP = false) => {
+        const payload = {
+          apiKey: apiKey.trim(),
+          model: selectedModel, // Using selected model from dropdown
+          max_tokens: 800,
+          messages: [
+            { role: 'user', content: systemPrompt + '\n\n' + userMessage },
+          ],
+        };
+        
+        // Add MCP servers for enhanced research capabilities
+        if (useMCP && mcpEnabled) {
+          payload.mcp_servers = [
+            'windsornguyen/open-meteo-mcp',              // Weather forecasts
+            'modelcontextprotocol/servers-brave-search', // Web search for facts
+          ];
+        }
+        
+        const resp = await fetch(`${API_BASE_URL}/api/chat`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            apiKey: apiKey.trim(),
-            model: 'gpt-4o',
-            max_tokens: 800,
-            messages: [
-              { role: 'system', content: systemPrompt },
-              { role: 'user', content: userMessage },
-            ],
-          }),
+          body: JSON.stringify(payload),
         });
         const data = await resp.json();
         if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
         const raw = data.choices[0].message.content;
         return JSON.parse(raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
       };
+
 
       /* ── Process AI result: create children, may also have checkpoint insight ── */
       const processResult = (result, parentId, parentDepth) => {
@@ -167,14 +211,17 @@ Additionally, based on concrete details the user has mentioned so far (companies
         setRecommendation(null);
         setDecisionInput('');
         setError(null);
+        setStepCounter(1); // Reset step counter
         try {
+          // Don't use MCP on first question, just get started
           const result = await callAI(
             `You are a helpful decision-making assistant. Help users make decisions by asking clarifying questions.
 Ask one relevant clarifying question to understand their situation better, with 3 possible answers.
 Each option: 2-6 words, genuinely different perspectives. Keep it concise and friendly. No emojis.
 ${NO_RESEARCH}
 Return ONLY valid JSON: {"question":"...","options":["...","...","..."],"research":null}`,
-            decision
+            decision,
+            false // Don't use MCP on initial question
           );
           const { kids, research } = processResult(result, rId, 0);
           setNodes(prev => {
@@ -207,20 +254,35 @@ Return ONLY valid JSON: {"question":"...","options":["...","...","..."],"researc
         setNodes(prev => ({ ...prev, [optId]: { ...prev[optId], explored: true, userText: customText } }));
         setActiveNodeId(optId);
         setLoading(true);
+        
+        // Increment step counter
+        const currentStep = stepCounter + 1;
+        setStepCounter(currentStep);
 
         try {
           const isCheckpoint = depth > 0 && depth % CHECKPOINT_EVERY === 0;
           const includeResearch = depth % 2 === 0 && depth > 0;
+          
+          // Enable MCP every 2 steps for enhanced research
+          const useMCP = mcpEnabled && (currentStep % 2 === 0);
 
           const result = await callAI(
             `You are a helpful decision-making assistant exploring: "${decision}"
 Path so far:
 ${pathDesc}
+${useMCP ? `
+AVAILABLE RESEARCH TOOLS:
+- Weather forecasts (via Open-Meteo) - for location-based decisions
+- Web search (via Brave Search) - for current facts, data, comparisons
+
+When the user mentions specific locations, companies, products, or needs factual data, USE THESE TOOLS to provide accurate, current information in your research field.
+` : ''}
 Ask a thoughtful follow-up question that helps narrow down the decision, with 3 possible answers. Each option: 2-6 words. Keep it concise and friendly. No emojis.
 ${isCheckpoint ? `Also include a "checkpoint" field: a 1-2 sentence insight summarizing what you've learned about the user so far from this branch. Be personal and reflective.` : 'Set "checkpoint": null.'}
 ${includeResearch ? RESEARCH_INSTRUCTION : NO_RESEARCH}
 Return ONLY valid JSON: {"question":"...","options":["...","...","..."],"checkpoint":${isCheckpoint ? '"1-2 sentence insight"' : 'null'},"research":${includeResearch ? '{...} or null' : 'null'}}`,
-            `Continue from: "${lastAnswer}"`
+            `Continue from: "${lastAnswer}"`,
+            useMCP // Pass MCP flag
           );
 
           const { kids, checkpoint, research } = processResult(result, optId, depth);
@@ -437,18 +499,18 @@ Return ONLY valid JSON:
       if (showKeyPrompt) {
         return (
           <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #f5f2ee 0%, #e8f0fe 50%, #f3e8fd 100%)', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-            <div style={{ background: '#fff', borderRadius: '24px', padding: '48px', boxShadow: '0 8px 40px rgba(0,0,0,0.06)', maxWidth: '420px', width: '90%', textAlign: 'center' }}>
+            <div className="mosaic-key-card" style={{ background: '#fff', borderRadius: '24px', padding: '48px', boxShadow: '0 8px 40px rgba(0,0,0,0.06)', maxWidth: '420px', width: '90%', textAlign: 'center' }}>
               <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#10024;</div>
               <h1 style={{ fontSize: '28px', fontWeight: 700, color: '#2d2a26', marginBottom: '8px' }}>Mosaic Mind</h1>
-              <p style={{ color: '#8a8279', fontSize: '14px', marginBottom: '24px' }}>Enter your OpenAI API key to begin</p>
-              <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-..."
+              <p style={{ color: '#8a8279', fontSize: '14px', marginBottom: '24px' }}>Enter your Dedalus Labs API key to begin</p>
+              <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="dl-..."
                 onKeyDown={e => e.key === 'Enter' && apiKey.trim() && setShowKeyPrompt(false)}
                 style={{ width: '100%', padding: '12px 16px', borderRadius: '12px', border: '1px solid #e0d8cf', fontSize: '14px', color: '#2d2a26', outline: 'none', marginBottom: '16px', boxSizing: 'border-box' }}
               />
               <button onClick={() => apiKey.trim() && setShowKeyPrompt(false)} disabled={!apiKey.trim()}
                 style={{ width: '100%', padding: '12px', background: apiKey.trim() ? 'linear-gradient(135deg, #c8d8f0 0%, #d8c8e8 50%, #f0d8c8 100%)' : '#e8e2da', border: 'none', borderRadius: '12px', fontSize: '15px', fontWeight: 600, color: apiKey.trim() ? '#2d2a26' : '#b0a99f', cursor: apiKey.trim() ? 'pointer' : 'not-allowed' }}
               >Enter the Mosaic</button>
-              <p style={{ color: '#b0a99f', fontSize: '11px', marginTop: '16px' }}>Your key stays in your browser.</p>
+              <p style={{ color: '#b0a99f', fontSize: '11px', marginTop: '16px' }}>Get your key at <a href="https://www.dedaluslabs.ai/dashboard/api-keys" target="_blank" style={{ color: '#6366f1', textDecoration: 'none' }}>dedaluslabs.ai</a></p>
             </div>
           </div>
         );
@@ -469,18 +531,36 @@ Return ONLY valid JSON:
 
       /* ── Main layout ── */
       return (
-        <div style={{ height: '100vh', display: 'flex', background: '#f5f2ee', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+        <div className="mosaic-main" style={{ height: '100vh', display: 'flex', background: '#f5f2ee', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+
+          {/* ─── Mobile Top Bar ─── */}
+          <div className="mosaic-topbar" style={{ display: 'none', order: 1, alignItems: 'center', gap: '10px', padding: '12px 18px', background: 'linear-gradient(135deg, #fef9ef 0%, #e8f0fe 50%, #f3e8fd 100%)', borderBottom: '1px solid #e8e2da', flexShrink: 0 }}>
+            <SparklesIcon />
+            <div style={{ flex: 1 }}>
+              <h1 style={{ fontSize: '18px', fontWeight: 700, color: '#2d2a26', margin: 0 }}>Mosaic Mind</h1>
+              <p style={{ fontSize: '10px', color: '#8a8279', margin: 0 }}>Explore every angle</p>
+            </div>
+            <button onClick={() => setShowKeyPrompt(true)} style={{ fontSize: '10px', color: '#b0a99f', background: 'none', border: '1px solid #e0d8cf', borderRadius: '8px', padding: '3px 8px', cursor: 'pointer' }}>Key</button>
+          </div>
 
           {/* ─── Left Panel ─── */}
-          <div style={{ width: '35%', display: 'flex', flexDirection: 'column', background: '#faf8f5', borderRight: '1px solid #e8e2da' }}>
-            <div style={{ padding: '18px 22px', borderBottom: '1px solid #e8e2da', background: 'linear-gradient(135deg, #fef9ef 0%, #e8f0fe 50%, #f3e8fd 100%)' }}>
+          <div className="mosaic-chat" style={{ width: '35%', display: 'flex', flexDirection: 'column', background: '#faf8f5', borderRight: '1px solid #e8e2da' }}>
+            <div className="mosaic-chat-header" style={{ padding: '18px 22px', borderBottom: '1px solid #e8e2da', background: 'linear-gradient(135deg, #fef9ef 0%, #e8f0fe 50%, #f3e8fd 100%)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <SparklesIcon />
-                <div>
+                <div style={{ flex: 1 }}>
                   <h1 style={{ fontSize: '20px', fontWeight: 700, color: '#2d2a26', margin: 0 }}>Mosaic Mind</h1>
-                  <p style={{ fontSize: '11px', color: '#8a8279', margin: '2px 0 0' }}>Explore every angle</p>
+                  <p style={{ fontSize: '11px', color: '#8a8279', margin: '2px 0 0' }}>
+                    Explore every angle
+                    {rootId && (
+                      <>
+                        <span style={{ marginLeft: '8px', color: '#b0a99f' }}>• {selectedModel.split('/')[1].split('-')[0]}</span>
+                        {mcpEnabled && <span style={{ marginLeft: '6px', color: '#10b981', fontWeight: 600 }}>• MCP On</span>}
+                      </>
+                    )}
+                  </p>
                 </div>
-                <button onClick={() => setShowKeyPrompt(true)} style={{ marginLeft: 'auto', fontSize: '10px', color: '#b0a99f', background: 'none', border: '1px solid #e0d8cf', borderRadius: '8px', padding: '3px 8px', cursor: 'pointer' }}>Change Key</button>
+                <button onClick={() => setShowKeyPrompt(true)} style={{ fontSize: '10px', color: '#b0a99f', background: 'none', border: '1px solid #e0d8cf', borderRadius: '8px', padding: '3px 8px', cursor: 'pointer' }}>Change Key</button>
               </div>
             </div>
 
@@ -494,6 +574,83 @@ Return ONLY valid JSON:
                     <p style={{ fontSize: '16px', fontWeight: 600, color: '#2d2a26', marginBottom: '4px' }}>What are you deciding?</p>
                     <p style={{ fontSize: '12px', color: '#8a8279' }}>Pick a starting point or type your own</p>
                   </div>
+                  
+                  {/* Model Selector */}
+                  <div style={{ marginBottom: '16px', padding: '14px', background: '#fff', borderRadius: '12px', border: '1px solid #e0d8cf' }}>
+                    <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#6b7280', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                      Choose AI Model
+                    </label>
+                    <select 
+                      value={selectedModel} 
+                      onChange={e => setSelectedModel(e.target.value)}
+                      style={{ 
+                        width: '100%', 
+                        padding: '10px 12px', 
+                        borderRadius: '10px', 
+                        border: '1px solid #e0d8cf', 
+                        fontSize: '13px',
+                        background: '#fafafa',
+                        color: '#2d2a26',
+                        cursor: 'pointer',
+                        outline: 'none'
+                      }}
+                    >
+                      <option value="anthropic/claude-haiku-4-5">Fast - Claude Haiku (cheapest, fastest)</option>
+                      <option value="anthropic/claude-sonnet-4-20250514">Balanced - Claude Sonnet (recommended)</option>
+                      <option value="anthropic/claude-opus-4-6">Powerful - Claude Opus (smartest, slowest)</option>
+                      <option value="openai/gpt-4o">Creative - GPT-4o (OpenAI)</option>
+                      <option value="google/gemini-2.0-flash-exp">Technical - Gemini 2.0 (Google)</option>
+                      <option value="deepseek/deepseek-chat">Economical - DeepSeek (very cheap)</option>
+                    </select>
+                    <p style={{ fontSize: '10px', color: '#b0a99f', marginTop: '6px', lineHeight: 1.4 }}>
+                      {selectedModel.includes('haiku') && 'Best for quick decisions and testing'}
+                      {selectedModel.includes('sonnet') && 'Great balance of speed and intelligence'}
+                      {selectedModel.includes('opus') && 'Most capable for complex reasoning'}
+                      {selectedModel.includes('gpt') && 'Excellent for creative and nuanced decisions'}
+                      {selectedModel.includes('gemini') && 'Strong technical and analytical capabilities'}
+                      {selectedModel.includes('deepseek') && 'Cost-effective for high-volume use'}
+                    </p>
+                  </div>
+                  
+                  {/* MCP Research Toggle */}
+                  <div style={{ marginBottom: '16px', padding: '14px', background: '#fff', borderRadius: '12px', border: '1px solid #e0d8cf' }}>
+                    <label style={{ display: 'flex', alignItems: 'flex-start', cursor: 'pointer', gap: '10px' }}>
+                      <input 
+                        type="checkbox" 
+                        checked={mcpEnabled} 
+                        onChange={e => setMcpEnabled(e.target.checked)}
+                        style={{ 
+                          marginTop: '2px',
+                          width: '16px',
+                          height: '16px',
+                          cursor: 'pointer',
+                          accentColor: '#6366f1'
+                        }}
+                      />
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontSize: '11px', fontWeight: 600, color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>
+                          Enhanced Research (MCP)
+                        </div>
+                        <div style={{ fontSize: '11px', color: '#8a8279', lineHeight: 1.4 }}>
+                          {mcpEnabled ? (
+                            <span>
+                              <strong>Active</strong> - AI can search the web and access weather data for better research
+                            </span>
+                          ) : (
+                            <span>
+                              <strong>Disabled</strong> - AI will rely only on its training knowledge
+                            </span>
+                          )}
+                        </div>
+                        {mcpEnabled && (
+                          <div style={{ fontSize: '10px', color: '#b0a99f', marginTop: '6px' }}>
+                            Tools: Web Search (Brave) • Weather Forecasts (Open-Meteo)
+                          </div>
+                        )}
+                      </div>
+                    </label>
+                  </div>
+                  
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {STARTERS.map((s, i) => (
                       <button key={i} onClick={() => handleStart(s.desc)}
@@ -692,12 +849,12 @@ Return ONLY valid JSON:
           </div>
 
           {/* ─── Right Panel: Tree ─── */}
-          <div style={{ width: '65%', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden', background: '#f0ece6' }}>
+          <div className="mosaic-tree" style={{ width: '65%', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden', background: '#f0ece6' }}>
             <div style={{ position: 'absolute', inset: 0, opacity: 0.3, backgroundImage: 'radial-gradient(circle at 2px 2px, rgba(180,170,155,0.12) 1px, transparent 0)', backgroundSize: '40px 40px' }}></div>
             <div style={{ position: 'absolute', top: '-80px', left: '-80px', width: '256px', height: '256px', borderRadius: '50%', opacity: 0.15, background: 'radial-gradient(circle, #f0e8ff, transparent 70%)' }}></div>
             <div style={{ position: 'absolute', top: '33%', right: '-40px', width: '192px', height: '192px', borderRadius: '50%', opacity: 0.12, background: 'radial-gradient(circle, #e0f0ff, transparent 70%)' }}></div>
 
-            <div style={{ padding: '18px 22px', borderBottom: '1px solid #e0d8cf', background: 'rgba(245,242,238,0.85)', backdropFilter: 'blur(8px)', position: 'relative', zIndex: 10 }}>
+            <div className="mosaic-tree-header" style={{ padding: '18px 22px', borderBottom: '1px solid #e0d8cf', background: 'rgba(245,242,238,0.85)', backdropFilter: 'blur(8px)', position: 'relative', zIndex: 10 }}>
               <h2 style={{ fontSize: '17px', fontWeight: 700, color: '#2d2a26', margin: 0 }}>Decision Tree</h2>
               <p style={{ fontSize: '11px', color: '#8a8279', margin: '2px 0 0' }}>
                 {!hasTree ? 'Your tree will grow here' : `${explored} path${explored === 1 ? '' : 's'} explored \u2014 click any faded node`}
@@ -870,7 +1027,7 @@ Return ONLY valid JSON:
             </div>
 
             {hasTree && (
-              <div style={{ padding: '12px', backdropFilter: 'blur(8px)', borderTop: '1px solid #e0d8cf', background: 'rgba(245,242,238,0.85)', textAlign: 'center', position: 'relative', zIndex: 10 }}>
+              <div className="mosaic-tree-footer" style={{ padding: '12px', backdropFilter: 'blur(8px)', borderTop: '1px solid #e0d8cf', background: 'rgba(245,242,238,0.85)', textAlign: 'center', position: 'relative', zIndex: 10 }}>
                 <p style={{ fontSize: '11px', color: '#8a8279' }}>Click faded nodes to explore | Hover gold dots for research</p>
               </div>
             )}
