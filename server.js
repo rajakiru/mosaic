@@ -9,7 +9,7 @@ const server = http.createServer((req, res) => {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -43,18 +43,31 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // Proxy API calls
+  // Proxy API calls to Dedalus
   if (req.method === 'POST' && req.url === '/api/chat') {
     let body = '';
     req.on('data', chunk => { body += chunk; });
     req.on('end', () => {
       try {
-        const { apiKey, ...payload } = JSON.parse(body);
+        const { apiKey, messages, model, max_tokens, stream, mcp_servers } = JSON.parse(body);
+
+        // Build the Dedalus API payload
+        const payload = {
+          model: model || 'anthropic/claude-sonnet-4-20250514',
+          messages: messages,
+          max_tokens: max_tokens || 1000,
+          stream: stream || false,
+        };
+
+        // Add MCP servers if provided
+        if (mcp_servers && mcp_servers.length > 0) {
+          payload.mcp_servers = mcp_servers;
+        }
 
         const postData = JSON.stringify(payload);
 
         const options = {
-          hostname: 'api.openai.com',
+          hostname: 'api.dedaluslabs.ai',
           port: 443,
           path: '/v1/chat/completions',
           method: 'POST',
@@ -96,5 +109,6 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`\n  ✨ Mosaic Mind server running!\n`);
+  console.log(`  Using Dedalus Labs API\n`);
   console.log(`  Open: http://localhost:${PORT}\n`);
 });
