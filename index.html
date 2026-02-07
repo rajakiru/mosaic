@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mosaic Mind</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    @keyframes bounce-dot { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-6px); } }
+    .dot-bounce { animation: bounce-dot 0.6s infinite ease-in-out; }
+    input::placeholder { color: #a0a8b4; }
+    @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    .fade-up { animation: fadeUp 0.35s ease-out forwards; }
+    .fade-up-1 { animation-delay: 0.05s; opacity: 0; }
+    .fade-up-2 { animation-delay: 0.12s; opacity: 0; }
+    .fade-up-3 { animation-delay: 0.19s; opacity: 0; }
+    @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+    .fade-in { animation: fadeIn 0.2s ease-out forwards; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useRef, useEffect, useMemo } = React;
+
+    /* ── Icons ── */
+    const SparklesIcon = () => (
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3l1.912 5.813a2 2 0 001.275 1.275L21 12l-5.813 1.912a2 2 0 00-1.275 1.275L12 21l-1.912-5.813a2 2 0 00-1.275-1.275L3 12l5.813-1.912a2 2 0 001.275-1.275L12 3z"/>
+        <path d="M5 3v4"/><path d="M3 5h4"/><path d="M19 17v4"/><path d="M17 19h4"/>
+      </svg>
+    );
+    const SendIcon = () => (
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/>
+      </svg>
+    );
+    const SearchIcon = () => (
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+      </svg>
+    );
+
+    /* ── Constants ── */
+    const NODE_W = 160;
+    const NODE_H = 52;
+    const ROOT_W = 220;
+    const ROOT_H = 60;
+    const LEVEL_H = 130;
+    const H_GAP = 28;
+    const PAD = 80;
+    const CHECKPOINT_EVERY = 4; // generate an insight every N steps (but keep going)
+
+    const STARTERS = [
+      { label: "Career change", desc: "Should I switch jobs or industries?" },
+      { label: "Big purchase", desc: "Help me decide on a major investment" },
+      { label: "Life decision", desc: "I'm torn between two life paths" },
+      { label: "Start a project", desc: "Should I pursue this side project?" },
+    ];
+
+    /* ── Research prompt snippet (only included every 2 steps) ── */
+    const RESEARCH_INSTRUCTION = `
+Additionally, based on concrete details the user has mentioned so far (companies, locations, fields, products, schools, etc.), include helpful factual data as research.
+"research": {"topic": "Brief title", "points": ["Specific fact 1", "Specific fact 2", "Specific fact 3"], "sources": ["Source 1", "Source 2"]}`;
+    const NO_RESEARCH = `Set "research": null in your response.`;
+
+    /* ── App ── */
+    const App = () => {
+      const [nodes, setNodes] = useState({});
+      const [rootId, setRootId] = useState(null);
+      const [activeNodeId, setActiveNodeId] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [apiKey, setApiKey] = useState('');
+      const [showKeyPrompt, setShowKeyPrompt] = useState(true);
+      const [recommendation, setRecommendation] = useState(null);
+      const [freeText, setFreeText] = useState('');
+      const [decisionInput, setDecisionInput] = useState('');
+      const [hoveredNodeId, setHoveredNodeId] = useState(null);
+      const [error, setError] = useState(null);
+      const treeRef = useRef(null);
+      const leftRef = useRef(null);
+
+      const genId = () => `n${Date.now()}${Math.random().toString(36).slice(2,6)}`;
+
+      /* ── Helpers ── */
+      const getPath = (nid, nodeMap) => {
+        const map = nodeMap || nodes;
+        const path = [];
+        let cur = nid;
+        while (cur && map[cur]) { path.unshift(map[cur]); cur = map[cur].parentId; }
+        return path;
+      };
+
+      const countExplored = () =>
+        Object.values(nodes).filter(n => n.explored && n.parentId).length;
+
+      const getExploredPaths = () => {
+        const paths = [];
+        const walk = (nid, trail) => {
+          const node = nodes[nid];
+          if (!node) return;
+          const cur = node.parentId ? [...trail, node] : trail;
+          const exploredKids = (node.children || []).filter(cid => nodes[cid]?.explored);
+          if (exploredKids.length === 0 && cur.length > 0) paths.push(cur);
+          else exploredKids.forEach(cid => walk(cid, cur));
+        };
+        if (rootId) walk(rootId, []);
+        return paths;
+      };
+
+      const buildPathDesc = (path) => {
+        let desc = '';
+        for (let i = 1; i < path.length; i++) {
+          const parent = path[i - 1];
+          if (parent.childQuestion) {
+            desc += `Q: "${parent.childQuestion}" -> A: "${path[i].text}"`;
+            if (path[i].userText) desc += ` (user said: "${path[i].userText}")`;
+            desc += '\n';
+          }
+        }
+        return desc;
+      };
+
+      /* ── API ── */
+      const callAI = async (systemPrompt, userMessage) => {
+        const resp = await fetch('http://localhost:3001/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            apiKey: apiKey.trim(),
+            model: 'gpt-4o',
+            max_tokens: 800,
+            messages: [
+              { role: 'system', content: systemPrompt },
+              { role: 'user', content: userMessage },
+            ],
+          }),
+        });
+        const data = await resp.json();
+        if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
+        const raw = data.choices[0].message.content;
+        return JSON.parse(raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim());
+      };
+
+      /* ── Process AI result: create children, may also have checkpoint insight ── */
+      const processResult = (result, parentId, parentDepth) => {
+        const kids = (result.options || []).map(opt => ({
+          id: genId(), text: opt, parentId, children: [],
+          childQuestion: null, explored: false, userText: null,
+          depth: parentDepth + 1, research: null, branchConclusion: null,
+        }));
+        return { kids, checkpoint: result.checkpoint || null, research: result.research || null };
+      };
+
+      /* ── Start decision ── */
+      const handleStart = async (decision) => {
+        const rId = genId();
+        const root = { id: rId, text: decision, parentId: null, children: [], childQuestion: null, explored: true, userText: null, depth: 0, research: null, branchConclusion: null };
+        setNodes({ [rId]: root });
+        setRootId(rId);
+        setActiveNodeId(rId);
+        setLoading(true);
+        setRecommendation(null);
+        setDecisionInput('');
+        setError(null);
+        try {
+          const result = await callAI(
+            `You are a helpful decision-making assistant. Help users make decisions by asking clarifying questions.
+Ask one relevant clarifying question to understand their situation better, with 3 possible answers.
+Each option: 2-6 words, genuinely different perspectives. Keep it concise and friendly. No emojis.
+${NO_RESEARCH}
+Return ONLY valid JSON: {"question":"...","options":["...","...","..."],"research":null}`,
+            decision
+          );
+          const { kids, research } = processResult(result, rId, 0);
+          setNodes(prev => {
+            const u = { ...prev };
+            u[rId] = { ...u[rId], childQuestion: result.question, children: kids.map(k => k.id), research };
+            kids.forEach(k => { u[k.id] = k; });
+            return u;
+          });
+        } catch (e) {
+          console.error(e);
+          setError(e.message || 'Something went wrong');
+          // Reset so user can try again
+          setNodes({});
+          setRootId(null);
+          setActiveNodeId(null);
+        }
+        finally { setLoading(false); }
+      };
+
+      /* ── Select an option ── */
+      const handleOptionSelect = async (optId, customText = null) => {
+        const updatedNode = { ...nodes[optId], explored: true, userText: customText };
+        const tempNodes = { ...nodes, [optId]: updatedNode };
+        const path = getPath(optId, tempNodes);
+        const pathDesc = buildPathDesc(path);
+        const decision = path[0].text;
+        const lastAnswer = customText || updatedNode.text;
+        const depth = updatedNode.depth || 0;
+
+        setNodes(prev => ({ ...prev, [optId]: { ...prev[optId], explored: true, userText: customText } }));
+        setActiveNodeId(optId);
+        setLoading(true);
+
+        try {
+          const isCheckpoint = depth > 0 && depth % CHECKPOINT_EVERY === 0;
+          const includeResearch = depth % 2 === 0 && depth > 0;
+
+          const result = await callAI(
+            `You are a helpful decision-making assistant exploring: "${decision}"
+Path so far:
+${pathDesc}
+Ask a thoughtful follow-up question that helps narrow down the decision, with 3 possible answers. Each option: 2-6 words. Keep it concise and friendly. No emojis.
+${isCheckpoint ? `Also include a "checkpoint" field: a 1-2 sentence insight summarizing what you've learned about the user so far from this branch. Be personal and reflective.` : 'Set "checkpoint": null.'}
+${includeResearch ? RESEARCH_INSTRUCTION : NO_RESEARCH}
+Return ONLY valid JSON: {"question":"...","options":["...","...","..."],"checkpoint":${isCheckpoint ? '"1-2 sentence insight"' : 'null'},"research":${includeResearch ? '{...} or null' : 'null'}}`,
+            `Continue from: "${lastAnswer}"`
+          );
+
+          const { kids, checkpoint, research } = processResult(result, optId, depth);
+
+          setNodes(prev => {
+            const u = { ...prev };
+            u[optId] = {
+              ...u[optId], explored: true, userText: customText,
+              childQuestion: result.question || null,
+              children: kids.map(k => k.id),
+              research: research,
+              branchConclusion: checkpoint,
+            };
+            kids.forEach(k => { u[k.id] = k; });
+            return u;
+          });
+        } catch (e) {
+          console.error(e);
+          setError(e.message || 'Something went wrong');
+        }
+        finally { setLoading(false); }
+      };
+
+      /* ── Click node on tree ── */
+      const handleTreeNodeClick = (nodeId) => {
+        if (loading) return;
+        const node = nodes[nodeId];
+        if (!node || nodeId === rootId) { setActiveNodeId(rootId); return; }
+        if (node.explored && node.children.length > 0) {
+          setActiveNodeId(nodeId);
+        } else if (!node.explored) {
+          handleOptionSelect(nodeId);
+        }
+      };
+
+      /* ── Free text input ── */
+      const handleFreeText = async () => {
+        if (!freeText.trim() || loading || !activeNodeId) return;
+        const text = freeText.trim();
+        const activeNode = nodes[activeNodeId];
+        if (!activeNode?.children?.length) return;
+
+        const unexplored = activeNode.children.filter(cid => !nodes[cid]?.explored).map(cid => nodes[cid]);
+        if (unexplored.length === 0) return;
+
+        setLoading(true);
+        setFreeText('');
+        try {
+          const decision = nodes[rootId].text;
+          const optList = unexplored.map(o => `"${o.text}" [id:${o.id}]`).join('\n');
+          const depth = (unexplored[0]?.depth || 1);
+
+          const includeResearch = depth % 2 === 0 && depth > 0;
+          const isCheckpoint = depth > 0 && depth % CHECKPOINT_EVERY === 0;
+
+          const result = await callAI(
+            `You are a helpful decision-making assistant. The user is exploring: "${decision}"
+Current question: "${activeNode.childQuestion}"
+Available options:
+${optList}
+The user typed their own response. Match it to the closest option and generate a thoughtful follow-up. No emojis.
+${isCheckpoint ? 'Also include a "checkpoint" field: a 1-2 sentence insight about what you\'ve learned about the user. Be personal.' : 'Set "checkpoint": null.'}
+${includeResearch ? RESEARCH_INSTRUCTION : NO_RESEARCH}
+Return ONLY valid JSON: {"matchedId":"the-node-id","question":"...","options":["...","...","..."],"checkpoint":${isCheckpoint ? '"..."' : 'null'},"research":${includeResearch ? '{...} or null' : 'null'}}`,
+            text
+          );
+
+          if (result.matchedId && nodes[result.matchedId]) {
+            const mId = result.matchedId;
+            const { kids, checkpoint, research } = processResult(result, mId, depth);
+            setNodes(prev => {
+              const u = { ...prev };
+              u[mId] = {
+                ...u[mId], explored: true, userText: text,
+                childQuestion: result.question || null,
+                children: kids.map(k => k.id),
+                research, branchConclusion: checkpoint,
+              };
+              kids.forEach(k => { u[k.id] = k; });
+              return u;
+            });
+            setActiveNodeId(mId);
+          }
+        } catch (e) {
+          console.error(e);
+          setError(e.message || 'Something went wrong');
+        }
+        finally { setLoading(false); }
+      };
+
+      /* ── Synthesize ── */
+      const handleSynthesize = async () => {
+        setLoading(true);
+        try {
+          const decision = nodes[rootId].text;
+          const paths = getExploredPaths();
+          let desc = '';
+          paths.forEach((path, i) => {
+            desc += `\nBranch ${i + 1}:\n`;
+            path.forEach(node => {
+              const parent = nodes[node.parentId];
+              if (parent?.childQuestion) {
+                desc += `  Q: "${parent.childQuestion}" -> A: "${node.text}"`;
+                if (node.userText) desc += ` (user said: "${node.userText}")`;
+                desc += '\n';
+              }
+              if (node.branchConclusion) desc += `  Branch insight: ${node.branchConclusion}\n`;
+            });
+          });
+          const result = await callAI(
+            `Synthesize the user's exploration of: "${decision}"
+Explored branches:
+${desc}
+Give a personalized recommendation referencing specific choices. Explain how branches connect or reveal patterns. Be direct, insightful, actionable. 4-6 sentences. No emojis.
+Return ONLY valid JSON: {"recommendation":"..."}`,
+            'Synthesize my exploration'
+          );
+          setRecommendation(result.recommendation);
+        } catch (e) {
+          console.error(e);
+          setError(e.message || 'Something went wrong');
+        }
+        finally { setLoading(false); }
+      };
+
+      /* ── Force Decision ── */
+      const handleForceDecision = async () => {
+        setLoading(true);
+        try {
+          const decision = nodes[rootId].text;
+          const paths = getExploredPaths();
+          let desc = '';
+          paths.forEach((path, i) => {
+            desc += `\nBranch ${i + 1}:\n`;
+            path.forEach(node => {
+              const parent = nodes[node.parentId];
+              if (parent?.childQuestion) {
+                desc += `  Q: "${parent.childQuestion}" -> A: "${node.text}"`;
+                if (node.userText) desc += ` (user said: "${node.userText}")`;
+                desc += '\n';
+              }
+              if (node.branchConclusion) desc += `  Insight: ${node.branchConclusion}\n`;
+            });
+          });
+          const result = await callAI(
+            `The user has been exploring: "${decision}"
+Here is everything they've revealed through their choices:
+${desc}
+You MUST now make ONE clear decision for them. No hedging, no "it depends", no "consider both." Pick one path and commit.
+
+Return ONLY valid JSON:
+{"decision":"One bold sentence: what they should do","reasoning":"1-2 sentences on WHY based on their answers","action_plan":["Step 1: specific action","Step 2: specific action","Step 3: specific action"]}`,
+            'Force a decision for me'
+          );
+          setRecommendation(result);
+        } catch (e) {
+          console.error(e);
+          setError(e.message || 'Something went wrong');
+        }
+        finally { setLoading(false); }
+      };
+
+      /* ── Tree layout ── */
+      const treeLayout = useMemo(() => {
+        if (!rootId || !nodes[rootId]) return { positions: {}, width: 800, height: 400 };
+        const getW = (nid) => {
+          const n = nodes[nid];
+          if (!n?.children?.length) return nid === rootId ? ROOT_W : NODE_W;
+          let total = 0;
+          n.children.forEach(cid => { total += getW(cid); });
+          total += (n.children.length - 1) * H_GAP;
+          return Math.max(NODE_W, total);
+        };
+        const positions = {};
+        const place = (nid, cx, y) => {
+          positions[nid] = { x: cx, y };
+          const n = nodes[nid];
+          if (!n?.children?.length) return;
+          const cws = n.children.map(cid => getW(cid));
+          const total = cws.reduce((a, b) => a + b, 0) + (n.children.length - 1) * H_GAP;
+          let sx = cx - total / 2;
+          n.children.forEach((cid, i) => {
+            place(cid, sx + cws[i] / 2, y + LEVEL_H);
+            sx += cws[i] + H_GAP;
+          });
+        };
+        const totalW = getW(rootId);
+        place(rootId, Math.max(totalW / 2 + PAD, 500), PAD);
+        let maxX = 0, maxY = 0;
+        Object.values(positions).forEach(p => {
+          maxX = Math.max(maxX, p.x + NODE_W);
+          maxY = Math.max(maxY, p.y + NODE_H);
+        });
+        return { positions, width: maxX + PAD * 2, height: maxY + PAD * 2 };
+      }, [nodes, rootId]);
+
+      /* ── Auto-scroll ── */
+      useEffect(() => {
+        if (treeRef.current && activeNodeId && treeLayout.positions[activeNodeId]) {
+          const p = treeLayout.positions[activeNodeId];
+          treeRef.current.scrollTo({
+            left: p.x - treeRef.current.clientWidth / 2,
+            top: Math.max(0, p.y - treeRef.current.clientHeight / 3),
+            behavior: 'smooth',
+          });
+        }
+      }, [activeNodeId, treeLayout]);
+
+      useEffect(() => {
+        if (leftRef.current) leftRef.current.scrollTo({ top: leftRef.current.scrollHeight, behavior: 'smooth' });
+      }, [activeNodeId, loading, recommendation]);
+
+      /* ── API key screen ── */
+      if (showKeyPrompt) {
+        return (
+          <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #f5f2ee 0%, #e8f0fe 50%, #f3e8fd 100%)', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+            <div style={{ background: '#fff', borderRadius: '24px', padding: '48px', boxShadow: '0 8px 40px rgba(0,0,0,0.06)', maxWidth: '420px', width: '90%', textAlign: 'center' }}>
+              <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#10024;</div>
+              <h1 style={{ fontSize: '28px', fontWeight: 700, color: '#2d2a26', marginBottom: '8px' }}>Mosaic Mind</h1>
+              <p style={{ color: '#8a8279', fontSize: '14px', marginBottom: '24px' }}>Enter your OpenAI API key to begin</p>
+              <input type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder="sk-..."
+                onKeyDown={e => e.key === 'Enter' && apiKey.trim() && setShowKeyPrompt(false)}
+                style={{ width: '100%', padding: '12px 16px', borderRadius: '12px', border: '1px solid #e0d8cf', fontSize: '14px', color: '#2d2a26', outline: 'none', marginBottom: '16px', boxSizing: 'border-box' }}
+              />
+              <button onClick={() => apiKey.trim() && setShowKeyPrompt(false)} disabled={!apiKey.trim()}
+                style={{ width: '100%', padding: '12px', background: apiKey.trim() ? 'linear-gradient(135deg, #c8d8f0 0%, #d8c8e8 50%, #f0d8c8 100%)' : '#e8e2da', border: 'none', borderRadius: '12px', fontSize: '15px', fontWeight: 600, color: apiKey.trim() ? '#2d2a26' : '#b0a99f', cursor: apiKey.trim() ? 'pointer' : 'not-allowed' }}
+              >Enter the Mosaic</button>
+              <p style={{ color: '#b0a99f', fontSize: '11px', marginTop: '16px' }}>Your key stays in your browser.</p>
+            </div>
+          </div>
+        );
+      }
+
+      /* ── Derived state ── */
+      const activeNode = activeNodeId ? nodes[activeNodeId] : null;
+      const activeChildren = activeNode?.children?.map(cid => nodes[cid]).filter(Boolean) || [];
+      const activeQuestion = activeNode?.childQuestion;
+      const explored = countExplored();
+      const breadcrumb = activeNodeId ? getPath(activeNodeId) : [];
+      const hasTree = rootId && Object.keys(nodes).length > 1;
+
+      // Find research for hovered node (walk up to find nearest)
+      const hoveredNode = hoveredNodeId ? nodes[hoveredNodeId] : null;
+      const hoveredResearch = hoveredNode?.research || null;
+      const hoveredPos = hoveredNodeId ? treeLayout.positions[hoveredNodeId] : null;
+
+      /* ── Main layout ── */
+      return (
+        <div style={{ height: '100vh', display: 'flex', background: '#f5f2ee', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+
+          {/* ─── Left Panel ─── */}
+          <div style={{ width: '35%', display: 'flex', flexDirection: 'column', background: '#faf8f5', borderRight: '1px solid #e8e2da' }}>
+            <div style={{ padding: '18px 22px', borderBottom: '1px solid #e8e2da', background: 'linear-gradient(135deg, #fef9ef 0%, #e8f0fe 50%, #f3e8fd 100%)' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <SparklesIcon />
+                <div>
+                  <h1 style={{ fontSize: '20px', fontWeight: 700, color: '#2d2a26', margin: 0 }}>Mosaic Mind</h1>
+                  <p style={{ fontSize: '11px', color: '#8a8279', margin: '2px 0 0' }}>Explore every angle</p>
+                </div>
+                <button onClick={() => setShowKeyPrompt(true)} style={{ marginLeft: 'auto', fontSize: '10px', color: '#b0a99f', background: 'none', border: '1px solid #e0d8cf', borderRadius: '8px', padding: '3px 8px', cursor: 'pointer' }}>Change Key</button>
+              </div>
+            </div>
+
+            <div ref={leftRef} style={{ flex: 1, overflowY: 'auto', padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+
+              {/* Empty state */}
+              {!rootId && (
+                <div style={{ marginTop: '20px' }}>
+                  <div style={{ textAlign: 'center', marginBottom: '24px' }}>
+                    <div style={{ fontSize: '44px', marginBottom: '10px' }}>&#129513;</div>
+                    <p style={{ fontSize: '16px', fontWeight: 600, color: '#2d2a26', marginBottom: '4px' }}>What are you deciding?</p>
+                    <p style={{ fontSize: '12px', color: '#8a8279' }}>Pick a starting point or type your own</p>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {STARTERS.map((s, i) => (
+                      <button key={i} onClick={() => handleStart(s.desc)}
+                        className={`fade-up fade-up-${Math.min(i + 1, 3)}`}
+                        style={{ padding: '12px 16px', borderRadius: '12px', textAlign: 'left', background: '#fff', border: '1px solid #e0d8cf', cursor: 'pointer', transition: 'transform 0.15s, box-shadow 0.15s', boxShadow: '0 2px 8px rgba(0,0,0,0.03)' }}
+                        onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 6px 16px rgba(0,0,0,0.06)'; }}
+                        onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.03)'; }}
+                      >
+                        <div style={{ fontSize: '13px', fontWeight: 600, color: '#2d2a26' }}>{s.label}</div>
+                        <div style={{ fontSize: '11px', color: '#8a8279', marginTop: '2px' }}>{s.desc}</div>
+                      </button>
+                    ))}
+                  </div>
+                  <div style={{ marginTop: '12px', display: 'flex', gap: '6px' }}>
+                    <input type="text" value={decisionInput} onChange={e => setDecisionInput(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && decisionInput.trim() && handleStart(decisionInput.trim())}
+                      placeholder="Or type your own question..."
+                      style={{ flex: 1, padding: '10px 14px', borderRadius: '10px', fontSize: '13px', background: '#fff', border: '1px solid #e0d8cf', color: '#2d2a26', outline: 'none' }}
+                    />
+                    <button onClick={() => decisionInput.trim() && handleStart(decisionInput.trim())} disabled={!decisionInput.trim()}
+                      style={{ padding: '10px 14px', borderRadius: '10px', border: 'none', background: decisionInput.trim() ? 'linear-gradient(135deg, #c8d8f0, #d8c8e8)' : '#e8e2da', color: '#4a453e', cursor: decisionInput.trim() ? 'pointer' : 'not-allowed', opacity: decisionInput.trim() ? 1 : 0.4 }}
+                    ><SendIcon /></button>
+                  </div>
+                </div>
+              )}
+
+              {/* Breadcrumb */}
+              {activeNode && breadcrumb.length > 1 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', alignItems: 'center', fontSize: '11px', color: '#8a8279' }}>
+                  {breadcrumb.map((n, i) => (
+                    <React.Fragment key={n.id}>
+                      {i > 0 && <span style={{ color: '#c8c0b8' }}>&rsaquo;</span>}
+                      <span style={{ cursor: 'pointer', color: i === breadcrumb.length - 1 ? '#2d2a26' : '#8a8279', fontWeight: i === breadcrumb.length - 1 ? 600 : 400 }}
+                        onClick={() => handleTreeNodeClick(n.id)}>
+                        {n.text.length > 30 ? n.text.slice(0, 30) + '...' : n.text}
+                      </span>
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
+
+              {/* Research card (if active node has research) */}
+              {activeNode?.research && !loading && (
+                <div className="fade-up" style={{ background: '#fffbf0', border: '1px solid #e8d8a0', borderRadius: '12px', padding: '14px 16px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
+                    <SearchIcon />
+                    <span style={{ fontSize: '10px', fontWeight: 700, color: '#8a7020', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Research: {activeNode.research.topic}</span>
+                  </div>
+                  <ul style={{ margin: 0, paddingLeft: '16px', listStyle: 'disc' }}>
+                    {activeNode.research.points.map((pt, i) => (
+                      <li key={i} style={{ fontSize: '12px', color: '#4a453e', lineHeight: 1.5, marginBottom: '4px' }}>{pt}</li>
+                    ))}
+                  </ul>
+                  {activeNode.research.sources?.length > 0 && (
+                    <div style={{ marginTop: '8px', fontSize: '10px', color: '#b0a070' }}>
+                      Sources: {activeNode.research.sources.join(' | ')}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Current question + options */}
+              {activeQuestion && !loading && (
+                <div>
+                  <div style={{ background: '#fff', border: '1px solid #e0d8cf', borderRadius: '14px', padding: '16px 18px', marginBottom: '12px' }}>
+                    <p style={{ fontSize: '15px', fontWeight: 600, color: '#2d2a26', lineHeight: 1.5 }}>{activeQuestion}</p>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {activeChildren.map((child, i) => (
+                      <button key={child.id} onClick={() => !child.explored && handleOptionSelect(child.id)}
+                        disabled={child.explored}
+                        className={`fade-up fade-up-${Math.min(i + 1, 3)}`}
+                        style={{
+                          display: 'block', width: '100%', textAlign: 'left', padding: '14px 16px',
+                          borderRadius: '12px', cursor: child.explored ? 'default' : 'pointer',
+                          background: child.explored ? '#e8f0fe' : '#fff',
+                          border: `1px solid ${child.explored ? '#94b8e8' : '#e0d8cf'}`,
+                          transition: 'transform 0.15s, box-shadow 0.15s',
+                          opacity: child.explored ? 0.7 : 1,
+                          boxShadow: '0 2px 8px rgba(0,0,0,0.03)',
+                        }}
+                        onMouseEnter={e => { if (!child.explored) { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.boxShadow = '0 6px 16px rgba(0,0,0,0.06)'; } }}
+                        onMouseLeave={e => { e.currentTarget.style.transform = ''; e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.03)'; }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <div style={{ fontSize: '14px', fontWeight: 600, color: '#2d2a26' }}>{child.text}</div>
+                          {child.research && <span style={{ color: '#c8a830' }}><SearchIcon /></span>}
+                        </div>
+                        {child.explored && child.userText && (
+                          <div style={{ fontSize: '11px', color: '#6b7280', marginTop: '4px', fontStyle: 'italic' }}>You said: "{child.userText}"</div>
+                        )}
+                        {child.explored && <div style={{ fontSize: '10px', color: '#94b8e8', marginTop: '4px' }}>Explored</div>}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Free text input */}
+                  <div style={{ marginTop: '10px', display: 'flex', gap: '6px' }}>
+                    <input type="text" value={freeText} onChange={e => setFreeText(e.target.value)}
+                      onKeyDown={e => e.key === 'Enter' && handleFreeText()}
+                      placeholder="Or type your own answer..."
+                      style={{ flex: 1, padding: '10px 14px', borderRadius: '10px', fontSize: '12px', background: '#fff', border: '1px dashed #d4cdc4', color: '#2d2a26', outline: 'none' }}
+                    />
+                    <button onClick={handleFreeText} disabled={!freeText.trim() || loading}
+                      style={{ padding: '10px 12px', borderRadius: '10px', border: 'none', background: freeText.trim() ? 'linear-gradient(135deg, #c8d8f0, #d8c8e8)' : '#e8e2da', color: '#4a453e', cursor: freeText.trim() ? 'pointer' : 'not-allowed', opacity: freeText.trim() ? 1 : 0.4 }}
+                    ><SendIcon /></button>
+                  </div>
+                </div>
+              )}
+
+              {/* Checkpoint insight (shows above the question, not a dead end) */}
+              {activeNode?.branchConclusion && !loading && (
+                <div className="fade-up" style={{ background: 'linear-gradient(135deg, #f0f4ff, #f5f0ff)', border: '1px solid #c0c8f0', borderRadius: '14px', padding: '14px 16px' }}>
+                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#6366f1', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '6px' }}>Insight</div>
+                  <p style={{ fontSize: '13px', color: '#2d2a26', lineHeight: 1.5 }}>{activeNode.branchConclusion}</p>
+                </div>
+              )}
+
+              {/* Error */}
+              {error && !loading && (
+                <div className="fade-up" style={{ background: '#fef2f2', border: '1px solid #fca5a5', borderRadius: '12px', padding: '14px 16px' }}>
+                  <div style={{ fontSize: '12px', fontWeight: 600, color: '#991b1b', marginBottom: '4px' }}>Error</div>
+                  <p style={{ fontSize: '12px', color: '#7f1d1d' }}>{error}</p>
+                  <button onClick={() => { setError(null); setNodes({}); setRootId(null); setActiveNodeId(null); }}
+                    style={{ marginTop: '8px', fontSize: '11px', color: '#991b1b', background: 'none', border: '1px solid #fca5a5', borderRadius: '8px', padding: '4px 10px', cursor: 'pointer' }}>
+                    Try again
+                  </button>
+                </div>
+              )}
+
+              {/* Loading */}
+              {loading && (
+                <div style={{ display: 'flex', justifyContent: 'center', padding: '24px' }}>
+                  <div style={{ background: '#fff', border: '1px solid #e8e2da', padding: '10px 20px', borderRadius: '14px', display: 'flex', gap: '4px' }}>
+                    <div className="dot-bounce" style={{ width: '7px', height: '7px', borderRadius: '50%', background: '#e8c8a0' }}></div>
+                    <div className="dot-bounce" style={{ width: '7px', height: '7px', borderRadius: '50%', background: '#a0c0e8', animationDelay: '0.1s' }}></div>
+                    <div className="dot-bounce" style={{ width: '7px', height: '7px', borderRadius: '50%', background: '#c8a0d8', animationDelay: '0.2s' }}></div>
+                  </div>
+                </div>
+              )}
+
+              {/* Action buttons — always visible once enough paths explored */}
+              {explored >= 2 && !loading && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px' }}>
+                  {(!recommendation || typeof recommendation === 'object') && (
+                    <button onClick={handleSynthesize}
+                      style={{ padding: '14px', borderRadius: '14px', border: '2px solid #6ee7b7', background: 'linear-gradient(135deg, #e0f5e9 0%, #e8f0fe 100%)', cursor: 'pointer', transition: 'transform 0.15s' }}
+                      onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; }}
+                      onMouseLeave={e => { e.currentTarget.style.transform = ''; }}
+                    >
+                      <div style={{ fontSize: '14px', fontWeight: 700, color: '#059669' }}>{typeof recommendation === 'string' ? 'Refresh insight' : 'Show me the full picture'}</div>
+                      <div style={{ fontSize: '11px', color: '#6b7280', marginTop: '2px' }}>{explored} path{explored === 1 ? '' : 's'} explored</div>
+                    </button>
+                  )}
+                  {explored >= 4 && (!recommendation || typeof recommendation === 'string') && (
+                    <button onClick={handleForceDecision}
+                      style={{ padding: '14px', borderRadius: '14px', border: '2px solid #f59e0b', background: 'linear-gradient(135deg, #fef3c7 0%, #fde68a 100%)', cursor: 'pointer', transition: 'transform 0.15s' }}
+                      onMouseEnter={e => { e.currentTarget.style.transform = 'translateY(-2px)'; }}
+                      onMouseLeave={e => { e.currentTarget.style.transform = ''; }}
+                    >
+                      <div style={{ fontSize: '14px', fontWeight: 700, color: '#92400e' }}>Force a decision</div>
+                      <div style={{ fontSize: '11px', color: '#78716c', marginTop: '2px' }}>One answer. No hedging.</div>
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* Recommendation (string from synthesize) */}
+              {recommendation && typeof recommendation === 'string' && (
+                <div className="fade-up" style={{ background: 'linear-gradient(135deg, #e0f5e9, #e8f0fe)', border: '2px solid #6ee7b7', borderRadius: '16px', padding: '20px' }}>
+                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#059669', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '10px' }}>Your Mosaic</div>
+                  <p style={{ fontSize: '14px', color: '#2d2a26', lineHeight: 1.6 }}>{recommendation}</p>
+                </div>
+              )}
+
+              {/* Forced Decision (structured from force decision) */}
+              {recommendation && typeof recommendation === 'object' && recommendation.decision && (
+                <div className="fade-up" style={{ background: 'linear-gradient(135deg, #fef3c7, #fff7ed)', border: '2px solid #f59e0b', borderRadius: '16px', padding: '20px' }}>
+                  <div style={{ fontSize: '10px', fontWeight: 700, color: '#92400e', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: '10px' }}>The Verdict</div>
+                  <p style={{ fontSize: '18px', fontWeight: 700, color: '#2d2a26', lineHeight: 1.4, marginBottom: '10px' }}>{recommendation.decision}</p>
+                  <p style={{ fontSize: '13px', color: '#4a453e', lineHeight: 1.5, marginBottom: '14px' }}>{recommendation.reasoning}</p>
+                  {recommendation.action_plan && (
+                    <div>
+                      <div style={{ fontSize: '10px', fontWeight: 700, color: '#92400e', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '8px' }}>Action Plan</div>
+                      {recommendation.action_plan.map((step, i) => (
+                        <div key={i} style={{ display: 'flex', gap: '8px', alignItems: 'baseline', marginBottom: '6px' }}>
+                          <div style={{ width: '20px', height: '20px', borderRadius: '50%', background: '#f59e0b', color: '#fff', fontSize: '11px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>{i + 1}</div>
+                          <p style={{ fontSize: '13px', color: '#2d2a26', lineHeight: 1.4 }}>{step}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* ─── Right Panel: Tree ─── */}
+          <div style={{ width: '65%', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden', background: '#f0ece6' }}>
+            <div style={{ position: 'absolute', inset: 0, opacity: 0.3, backgroundImage: 'radial-gradient(circle at 2px 2px, rgba(180,170,155,0.12) 1px, transparent 0)', backgroundSize: '40px 40px' }}></div>
+            <div style={{ position: 'absolute', top: '-80px', left: '-80px', width: '256px', height: '256px', borderRadius: '50%', opacity: 0.15, background: 'radial-gradient(circle, #f0e8ff, transparent 70%)' }}></div>
+            <div style={{ position: 'absolute', top: '33%', right: '-40px', width: '192px', height: '192px', borderRadius: '50%', opacity: 0.12, background: 'radial-gradient(circle, #e0f0ff, transparent 70%)' }}></div>
+
+            <div style={{ padding: '18px 22px', borderBottom: '1px solid #e0d8cf', background: 'rgba(245,242,238,0.85)', backdropFilter: 'blur(8px)', position: 'relative', zIndex: 10 }}>
+              <h2 style={{ fontSize: '17px', fontWeight: 700, color: '#2d2a26', margin: 0 }}>Decision Tree</h2>
+              <p style={{ fontSize: '11px', color: '#8a8279', margin: '2px 0 0' }}>
+                {!hasTree ? 'Your tree will grow here' : `${explored} path${explored === 1 ? '' : 's'} explored \u2014 click any faded node`}
+              </p>
+            </div>
+
+            <div ref={treeRef} style={{ flex: 1, overflow: 'auto', position: 'relative' }}>
+              {!hasTree ? (
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <div style={{ textAlign: 'center' }}>
+                    <div style={{ fontSize: '56px', marginBottom: '12px' }}>&#127795;</div>
+                    <p style={{ fontSize: '15px', color: '#8a8279' }}>Start a decision</p>
+                    <p style={{ fontSize: '12px', color: '#b0a99f', marginTop: '4px' }}>Watch your tree grow</p>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ position: 'relative', width: treeLayout.width, height: treeLayout.height }}>
+                  <svg width={treeLayout.width} height={treeLayout.height} style={{ display: 'block' }}>
+                    <defs>
+                      <filter id="ns" x="-10%" y="-10%" width="120%" height="130%">
+                        <feDropShadow dx="0" dy="2" stdDeviation="4" floodColor="rgba(0,0,0,0.07)"/>
+                      </filter>
+                      <linearGradient id="rg" x1="0" y1="0" x2="1" y2="1">
+                        <stop offset="0%" stopColor="#fef9ef"/>
+                        <stop offset="50%" stopColor="#e8f0fe"/>
+                        <stop offset="100%" stopColor="#f3e8fd"/>
+                      </linearGradient>
+                    </defs>
+
+                    {/* Edges */}
+                    {Object.values(nodes).map(node => {
+                      if (!node.children?.length || !treeLayout.positions[node.id]) return null;
+                      const pp = treeLayout.positions[node.id];
+                      const pH = node.id === rootId ? ROOT_H : NODE_H;
+                      return node.children.map(cid => {
+                        if (!treeLayout.positions[cid]) return null;
+                        const cp = treeLayout.positions[cid];
+                        const child = nodes[cid];
+                        const isExp = child?.explored;
+                        const midY = pp.y + pH / 2 + (cp.y - NODE_H / 2 - pp.y - pH / 2) / 2;
+                        return (
+                          <path key={`e-${node.id}-${cid}`}
+                            d={`M ${pp.x} ${pp.y + pH / 2} C ${pp.x} ${midY}, ${cp.x} ${midY}, ${cp.x} ${cp.y - NODE_H / 2}`}
+                            fill="none"
+                            stroke={isExp ? '#94a3b8' : '#d4cdc4'}
+                            strokeWidth={isExp ? 2 : 1.2}
+                            strokeDasharray={isExp ? 'none' : '4,3'}
+                            opacity={isExp ? 0.6 : 0.35}
+                          />
+                        );
+                      });
+                    })}
+
+                    {/* Question labels */}
+                    {Object.values(nodes).map(node => {
+                      if (!node.childQuestion || !node.children?.length || !treeLayout.positions[node.id]) return null;
+                      const pp = treeLayout.positions[node.id];
+                      const pH = node.id === rootId ? ROOT_H : NODE_H;
+                      return (
+                        <foreignObject key={`ql-${node.id}`} x={pp.x - 120} y={pp.y + pH / 2 + 8} width={240} height={40}>
+                          <div xmlns="http://www.w3.org/1999/xhtml" style={{ fontSize: '10px', color: '#8a8279', textAlign: 'center', fontStyle: 'italic', lineHeight: 1.3, overflow: 'hidden' }}>
+                            {node.childQuestion}
+                          </div>
+                        </foreignObject>
+                      );
+                    })}
+
+                    {/* Nodes */}
+                    {Object.keys(treeLayout.positions).map(nid => {
+                      const node = nodes[nid];
+                      if (!node) return null;
+                      const pos = treeLayout.positions[nid];
+                      const isRoot = nid === rootId;
+                      const w = isRoot ? ROOT_W : NODE_W;
+                      const h = isRoot ? ROOT_H : NODE_H;
+                      const isActive = nid === activeNodeId;
+                      const isExp = node.explored;
+                      const hasConcl = !!node.branchConclusion;
+                      const hasRes = !!node.research;
+
+                      let fill = '#fafafa', stroke = '#d4d4d8', strokeW = 1.2, dash = '4,3';
+                      let textColor = '#6b7280', fw = 400;
+
+                      if (isRoot) {
+                        fill = 'url(#rg)'; stroke = '#c8b8a8'; strokeW = 1.5; dash = 'none'; textColor = '#2d2a26'; fw = 700;
+                      } else if (isExp) {
+                        fill = '#e8f0fe';
+                        stroke = '#94b8e8';
+                        strokeW = 1.8; dash = 'none'; textColor = '#2d2a26'; fw = 600;
+                      }
+                      if (isActive && !isRoot) { stroke = '#6366f1'; strokeW = 2.5; }
+
+                      return (
+                        <g key={nid}
+                          onClick={() => handleTreeNodeClick(nid)}
+                          onMouseEnter={() => setHoveredNodeId(nid)}
+                          onMouseLeave={() => setHoveredNodeId(null)}
+                          style={{ cursor: isRoot ? 'default' : 'pointer' }}>
+                          <rect x={pos.x - w/2} y={pos.y - h/2} width={w} height={h} rx={isRoot ? 16 : 12}
+                            fill={fill} stroke={stroke} strokeWidth={strokeW} strokeDasharray={dash} filter="url(#ns)"/>
+                          <foreignObject x={pos.x - w/2 + 8} y={pos.y - h/2 + 4} width={w - 16} height={node.userText ? h - 18 : h - 8}>
+                            <div xmlns="http://www.w3.org/1999/xhtml" style={{
+                              fontSize: isRoot ? '13px' : '11px', fontWeight: fw, color: textColor,
+                              textAlign: 'center', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              height: '100%', lineHeight: 1.3, wordWrap: 'break-word', overflow: 'hidden',
+                            }}>
+                              {node.text}
+                            </div>
+                          </foreignObject>
+                          {node.userText && !isRoot && (
+                            <foreignObject x={pos.x - w/2 + 6} y={pos.y + h/2 - 16} width={w - 12} height={14}>
+                              <div xmlns="http://www.w3.org/1999/xhtml" style={{
+                                fontSize: '8px', color: '#8a7020', textAlign: 'center', fontStyle: 'italic',
+                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                              }}>
+                                "{node.userText}"
+                              </div>
+                            </foreignObject>
+                          )}
+                          {/* Explored indicator */}
+                          {isExp && !isRoot && (
+                            <circle cx={pos.x + w/2 - 8} cy={pos.y - h/2 + 8} r={4}
+                              fill={hasConcl ? '#818cf8' : '#6ee7b7'} stroke="white" strokeWidth={1.5} />
+                          )}
+                          {/* Research indicator */}
+                          {hasRes && (
+                            <g>
+                              <circle cx={pos.x - w/2 + 8} cy={pos.y - h/2 + 8} r={6} fill="#fbbf24" stroke="white" strokeWidth={1.5}/>
+                              <text x={pos.x - w/2 + 8} y={pos.y - h/2 + 11} textAnchor="middle" style={{ fontSize: '7px', fontWeight: 700, fill: '#fff' }}>R</text>
+                            </g>
+                          )}
+                        </g>
+                      );
+                    })}
+                  </svg>
+
+                  {/* Research hover card */}
+                  {hoveredResearch && hoveredPos && (
+                    <div className="fade-in" style={{
+                      position: 'absolute',
+                      left: hoveredPos.x + NODE_W / 2 + 12,
+                      top: hoveredPos.y - NODE_H / 2,
+                      width: 260,
+                      background: '#fffdf5',
+                      border: '1px solid #e8d8a0',
+                      borderRadius: '12px',
+                      padding: '14px 16px',
+                      boxShadow: '0 8px 24px rgba(0,0,0,0.08)',
+                      zIndex: 20,
+                      pointerEvents: 'none',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '8px' }}>
+                        <SearchIcon />
+                        <span style={{ fontSize: '10px', fontWeight: 700, color: '#8a7020', textTransform: 'uppercase', letterSpacing: '0.05em' }}>{hoveredResearch.topic}</span>
+                      </div>
+                      <ul style={{ margin: 0, paddingLeft: '14px', listStyle: 'disc' }}>
+                        {hoveredResearch.points?.map((pt, i) => (
+                          <li key={i} style={{ fontSize: '11px', color: '#4a453e', lineHeight: 1.4, marginBottom: '3px' }}>{pt}</li>
+                        ))}
+                      </ul>
+                      {hoveredResearch.sources?.length > 0 && (
+                        <div style={{ marginTop: '6px', fontSize: '9px', color: '#b0a070' }}>
+                          {hoveredResearch.sources.join(' | ')}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {hasTree && (
+              <div style={{ padding: '12px', backdropFilter: 'blur(8px)', borderTop: '1px solid #e0d8cf', background: 'rgba(245,242,238,0.85)', textAlign: 'center', position: 'relative', zIndex: 10 }}>
+                <p style={{ fontSize: '11px', color: '#8a8279' }}>Click faded nodes to explore | Hover gold dots for research</p>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
