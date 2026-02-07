@@ -20,6 +20,16 @@
     .fade-up-3 { animation-delay: 0.19s; opacity: 0; }
     @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
     .fade-in { animation: fadeIn 0.2s ease-out forwards; }
+
+    @media (max-width: 768px) {
+      .mosaic-main { flex-direction: column !important; height: 100vh !important; overflow: hidden !important; }
+      .mosaic-topbar { display: flex !important; }
+      .mosaic-tree { width: 100% !important; order: 2 !important; flex: 1 1 0% !important; }
+      .mosaic-chat { width: 100% !important; order: 3 !important; flex: 0 0 auto !important; max-height: 45vh !important; border-right: none !important; border-top: 1px solid #e8e2da; overflow-y: auto !important; }
+      .mosaic-chat-header { display: none !important; }
+      .mosaic-tree-header, .mosaic-tree-footer { display: none !important; }
+      .mosaic-key-card { padding: 32px 24px !important; }
+    }
   </style>
 </head>
 <body>
@@ -468,7 +478,7 @@ Return ONLY valid JSON:
       if (showKeyPrompt) {
         return (
           <div style={{ height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg, #f5f2ee 0%, #e8f0fe 50%, #f3e8fd 100%)', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
-            <div style={{ background: '#fff', borderRadius: '24px', padding: '48px', boxShadow: '0 8px 40px rgba(0,0,0,0.06)', maxWidth: '420px', width: '90%', textAlign: 'center' }}>
+            <div className="mosaic-key-card" style={{ background: '#fff', borderRadius: '24px', padding: '48px', boxShadow: '0 8px 40px rgba(0,0,0,0.06)', maxWidth: '420px', width: '90%', textAlign: 'center' }}>
               <div style={{ fontSize: '48px', marginBottom: '16px' }}>&#10024;</div>
               <h1 style={{ fontSize: '28px', fontWeight: 700, color: '#2d2a26', marginBottom: '8px' }}>Mosaic Mind</h1>
               <p style={{ color: '#8a8279', fontSize: '14px', marginBottom: '24px' }}>Enter your Dedalus Labs API key to begin</p>
@@ -500,11 +510,21 @@ Return ONLY valid JSON:
 
       /* ── Main layout ── */
       return (
-        <div style={{ height: '100vh', display: 'flex', background: '#f5f2ee', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+        <div className="mosaic-main" style={{ height: '100vh', display: 'flex', background: '#f5f2ee', fontFamily: 'system-ui, -apple-system, sans-serif' }}>
+
+          {/* ─── Mobile Top Bar ─── */}
+          <div className="mosaic-topbar" style={{ display: 'none', order: 1, alignItems: 'center', gap: '10px', padding: '12px 18px', background: 'linear-gradient(135deg, #fef9ef 0%, #e8f0fe 50%, #f3e8fd 100%)', borderBottom: '1px solid #e8e2da', flexShrink: 0 }}>
+            <SparklesIcon />
+            <div style={{ flex: 1 }}>
+              <h1 style={{ fontSize: '18px', fontWeight: 700, color: '#2d2a26', margin: 0 }}>Mosaic Mind</h1>
+              <p style={{ fontSize: '10px', color: '#8a8279', margin: 0 }}>Explore every angle</p>
+            </div>
+            <button onClick={() => setShowKeyPrompt(true)} style={{ fontSize: '10px', color: '#b0a99f', background: 'none', border: '1px solid #e0d8cf', borderRadius: '8px', padding: '3px 8px', cursor: 'pointer' }}>Key</button>
+          </div>
 
           {/* ─── Left Panel ─── */}
-          <div style={{ width: '35%', display: 'flex', flexDirection: 'column', background: '#faf8f5', borderRight: '1px solid #e8e2da' }}>
-            <div style={{ padding: '18px 22px', borderBottom: '1px solid #e8e2da', background: 'linear-gradient(135deg, #fef9ef 0%, #e8f0fe 50%, #f3e8fd 100%)' }}>
+          <div className="mosaic-chat" style={{ width: '35%', display: 'flex', flexDirection: 'column', background: '#faf8f5', borderRight: '1px solid #e8e2da' }}>
+            <div className="mosaic-chat-header" style={{ padding: '18px 22px', borderBottom: '1px solid #e8e2da', background: 'linear-gradient(135deg, #fef9ef 0%, #e8f0fe 50%, #f3e8fd 100%)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <SparklesIcon />
                 <div style={{ flex: 1 }}>
@@ -808,12 +828,12 @@ Return ONLY valid JSON:
           </div>
 
           {/* ─── Right Panel: Tree ─── */}
-          <div style={{ width: '65%', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden', background: '#f0ece6' }}>
+          <div className="mosaic-tree" style={{ width: '65%', display: 'flex', flexDirection: 'column', position: 'relative', overflow: 'hidden', background: '#f0ece6' }}>
             <div style={{ position: 'absolute', inset: 0, opacity: 0.3, backgroundImage: 'radial-gradient(circle at 2px 2px, rgba(180,170,155,0.12) 1px, transparent 0)', backgroundSize: '40px 40px' }}></div>
             <div style={{ position: 'absolute', top: '-80px', left: '-80px', width: '256px', height: '256px', borderRadius: '50%', opacity: 0.15, background: 'radial-gradient(circle, #f0e8ff, transparent 70%)' }}></div>
             <div style={{ position: 'absolute', top: '33%', right: '-40px', width: '192px', height: '192px', borderRadius: '50%', opacity: 0.12, background: 'radial-gradient(circle, #e0f0ff, transparent 70%)' }}></div>
 
-            <div style={{ padding: '18px 22px', borderBottom: '1px solid #e0d8cf', background: 'rgba(245,242,238,0.85)', backdropFilter: 'blur(8px)', position: 'relative', zIndex: 10 }}>
+            <div className="mosaic-tree-header" style={{ padding: '18px 22px', borderBottom: '1px solid #e0d8cf', background: 'rgba(245,242,238,0.85)', backdropFilter: 'blur(8px)', position: 'relative', zIndex: 10 }}>
               <h2 style={{ fontSize: '17px', fontWeight: 700, color: '#2d2a26', margin: 0 }}>Decision Tree</h2>
               <p style={{ fontSize: '11px', color: '#8a8279', margin: '2px 0 0' }}>
                 {!hasTree ? 'Your tree will grow here' : `${explored} path${explored === 1 ? '' : 's'} explored \u2014 click any faded node`}
@@ -986,7 +1006,7 @@ Return ONLY valid JSON:
             </div>
 
             {hasTree && (
-              <div style={{ padding: '12px', backdropFilter: 'blur(8px)', borderTop: '1px solid #e0d8cf', background: 'rgba(245,242,238,0.85)', textAlign: 'center', position: 'relative', zIndex: 10 }}>
+              <div className="mosaic-tree-footer" style={{ padding: '12px', backdropFilter: 'blur(8px)', borderTop: '1px solid #e0d8cf', background: 'rgba(245,242,238,0.85)', textAlign: 'center', position: 'relative', zIndex: 10 }}>
                 <p style={{ fontSize: '11px', color: '#8a8279' }}>Click faded nodes to explore | Hover gold dots for research</p>
               </div>
             )}
